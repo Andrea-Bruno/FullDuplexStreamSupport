@@ -28,32 +28,32 @@ dotnet add package FullDuplexStreamSupport
 
 To initialize the `PipeStream` with input and output streams:
 
-'''csharp
+```csharp
 Stream pipeIn = ...; // Your input stream Stream pipeOut = ...; // Your output stream PipeStream.Initialize(pipeIn, pipeOut, OnNewClientConnected);
-'''
+```
 
 
 ### Connecting with Timeout
 
 To connect to the pipe stream with a specified timeout:
 
-'''csharp
+```csharp
 var pipeStream = new PipeStream(clientId); pipeStream.Connect(timeoutMs: 5000); // Timeout in millisecond
-'''
+```
 
 ### Reading and Writing Data
 
 To write data to the pipe stream:
 
-'''csharp
+```csharp
 byte[] dataToSend = ...; await pipeStream.WriteAsync(dataToSend, 0, dataToSend.Length);
-'''
+```
 
 To read data from the pipe stream:
 
-'''csharp
+```csharp
 byte[] buffer = new byte[1024]; int bytesRead = await pipeStream.ReadAsync(buffer, 0, buffer.Length);
-'''
+```
 
 
 ## Scenarios of Use

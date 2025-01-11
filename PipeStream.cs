@@ -4,88 +4,294 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Threading;
+using System.Reflection;
+using System.Diagnostics;
 
 namespace FullDuplexStreamSupport
 {
     /// <summary>
-    /// Represents a full-duplex communication stream using named pipes.
+    /// Represents a full-duplex communication stream using various data streaming systems.
     /// This class provides methods for reading and writing data asynchronously and synchronously,
     /// managing client connections, and handling data transmission with a specified timeout.
     /// </summary>
-    public class PipeStream : Stream, IDisposable
+    public class PipeStream
     {
         /// <summary>
-        /// Initializes the pipe stream with the specified input and output streams.
+        /// Initializes the pipe stream as a server with the specified input and output streams.
         /// </summary>
         /// <param name="pipeIn">Input stream</param>
         /// <param name="pipeOut">Output stream</param>
-        /// <param name="onNewClient">Set server side to get an action to use as an event that fires when a new client connects. The action will return the new client connected.</param>
-        public static void Initialize(Stream pipeIn, Stream pipeOut, Action<PipeStream>? onNewClient = null)
+        /// <param name="onNewClient">Action to invoke when a new client connects</param>
+        public void InitializeServer(Stream pipeIn, Stream pipeOut, Action<PipeStreamClient>? onNewClient = null)
         {
-            OnNewClient = onNewClient;
-            PipeIn = pipeIn;
-            PipeOut = pipeOut;
-            ThreadReader = new Thread(() => StartDataReader());
-            ThreadReader.Start();
-        }
-        public static bool IsInitialized => PipeIn != null && PipeOut != null;
-        static Action<PipeStream>? OnNewClient;
-        public static bool AcceptNewClient = true;
-        internal static readonly Dictionary<uint, PipeStream> _clientList = new Dictionary<uint, PipeStream>();
-        static private Thread ThreadReader;
-        /// <summary>
-        /// Starts the data reader thread to handle incoming data.
-        /// </summary>
-        static private async void StartDataReader()
-        {
-            while (true)
+            IsListener = true;
+            new Thread(() =>
             {
-                // [0] = dataType 0=connection, 1=data
-                // [1-4] = dataLength
-                // [5-] = data
-                var startBytes = new byte[5];
-                await PipeIn.ReadAsync(startBytes, 0, 5);
-                var dataType = startBytes[0];
-                var dataLength = BitConverter.ToInt32(startBytes, 1);
-                var data = new byte[dataLength];
-                await PipeIn.ReadAsync(data, 0, dataLength);
-                if (dataType == 0) // new client connection
-                {
-                    if (AcceptNewClient)
-                    {
-                        uint clientID = BitConverter.ToUInt32(data, 0);
-                        var newPipeStream = new PipeStream(clientID);
-                        _clientList.Add(clientID, newPipeStream);
-                        OnNewClient?.Invoke(newPipeStream);
-                    }
-                }
-                else if (dataType == 1) // data for client
-                {
-                    lock (_clientList)
-                    {
-                        if (_clientList.TryGetValue(BitConverter.ToUInt32(data, 0), out var server))
-                        {
-                            server.AddDataToRead(data.Skip(4).ToArray());
-                        }
-                    }
-                }
+                Initialize(pipeIn, pipeOut, onNewClient);
+            }).Start();
+        }
+
+        /// <summary>
+        /// Initializes the pipe stream as a client with the specified input and output streams.
+        /// </summary>
+        /// <param name="pipeIn">Input stream</param>
+        /// <param name="pipeOut">Output stream</param>
+        /// <param name="connectTimeOutMs">Optional timeout for connection in milliseconds</param>
+        public void InitializeClient(Stream pipeIn, Stream pipeOut, int? connectTimeOutMs = null)
+        {
+            Initialize(pipeIn, pipeOut, connectTimeOutMs: connectTimeOutMs);
+        }
+
+        /// <summary>
+        /// Initializes the pipe stream with the specified input and output streams.
+        /// Re-initialization causes reset.
+        /// </summary>
+        /// <param name="pipeIn">Input stream</param>
+        /// <param name="pipeOut">Output stream</param>
+        /// <param name="onNewClient">Action to invoke when a new client connects</param>
+        /// <param name="connectTimeOutMs">Optional timeout for connection in milliseconds</param>
+        private void Initialize(Stream pipeIn, Stream pipeOut, Action<PipeStreamClient>? onNewClient = null, int? connectTimeOutMs = null)
+        {
+            lock (_clientList)
+            {
+                Stop();
+                Start();
+                OnNewClient = onNewClient;
+
+                PipeIn?.Dispose();
+                PipeIn = pipeIn;
+                CallConnect(pipeIn, connectTimeOutMs);
+
+                PipeOut?.Dispose();
+                PipeOut = pipeOut;
+                CallConnect(pipeOut, connectTimeOutMs);
+
+                WaitForConnection(pipeIn, pipeOut);
+
+                ThreadReader?.Abort();
+                DataError = false;
+                ThreadReader = new Thread(() => StartDataReader());
+                ThreadReader.Start();
             }
         }
 
-        static internal Stream? PipeIn;
-        static internal Stream? PipeOut;
-
-        private Queue<byte[]> _readQueue = new Queue<byte[]>();
-        private bool _disposed = false;
-
-        public PipeStream(uint id)
+        /// <summary>
+        /// Calls the Connect method on the stream with an optional timeout.
+        /// </summary>
+        /// <param name="stream">The stream to connect</param>
+        /// <param name="connectTimeOutMs">Optional timeout for connection in milliseconds</param>
+        private static void CallConnect(Stream stream, int? connectTimeOutMs)
         {
-            Id = id;
+            Type objectType = stream.GetType();
+            MethodInfo? methodInfo = null;
+
+            if (connectTimeOutMs == null)
+            {
+                methodInfo = objectType.GetMethods()
+                    .FirstOrDefault(m => m.Name == "Connect" && m.GetParameters().Length == 0);
+            }
+            else
+            {
+                methodInfo = objectType.GetMethods()
+                    .FirstOrDefault(m => m.Name == "Connect" && m.GetParameters().Length == 1 && m.GetParameters()[0].ParameterType == typeof(int));
+            }
+
+            methodInfo?.Invoke(stream, connectTimeOutMs == null ? null : new object[] { connectTimeOutMs });
         }
+
+        /// <summary>
+        /// Waits for the connection to be established for both input and output streams.
+        /// </summary>
+        /// <param name="pipeIn">Input stream</param>
+        /// <param name="pipeOut">Output stream</param>
+        private static void WaitForConnection(Stream pipeIn, Stream pipeOut)
+        {
+            bool pipeInConnected = false;
+            bool pipeOutConnected = false;
+
+            Type pipeInType = pipeIn.GetType();
+            Type pipeOutType = pipeOut.GetType();
+
+            MethodInfo? waitForConnectionIn = pipeInType.GetMethod("WaitForConnection");
+            MethodInfo? waitForConnectionOut = pipeOutType.GetMethod("WaitForConnection");
+
+            Task? waitForConnectionInTask = null;
+            Task? waitForConnectionOutTask = null;
+
+            if (waitForConnectionIn != null)
+            {
+                waitForConnectionInTask = Task.Run(() =>
+                {
+                    waitForConnectionIn.Invoke(pipeIn, null);
+                    pipeInConnected = true;
+                });
+            }
+            else
+            {
+                pipeInConnected = true;
+            }
+
+            if (waitForConnectionOut != null)
+            {
+                waitForConnectionOutTask = Task.Run(() =>
+                {
+                    waitForConnectionOut.Invoke(pipeOut, null);
+                    pipeOutConnected = true;
+                });
+            }
+            else
+            {
+                pipeOutConnected = true;
+            }
+
+            Task.WaitAll(new Task[] { waitForConnectionInTask ?? Task.CompletedTask, waitForConnectionOutTask ?? Task.CompletedTask });
+
+            if (!pipeInConnected || !pipeOutConnected)
+            {
+                throw new InvalidOperationException("Failed to establish connection for one or both streams.");
+            }
+        }
+
+        /// <summary>
+        /// Gets a value indicating whether the pipe stream is initialized.
+        /// </summary>
+        public bool IsInitialized
+        {
+            get
+            {
+                lock (_clientList)
+                {
+                    return PipeIn != null && PipeOut != null;
+                }
+            }
+        }
+        internal uint NextClientId;
+        private Action<PipeStreamClient>? OnNewClient;
+        public bool AcceptNewClient = true;
+        internal readonly Dictionary<uint, PipeStreamClient> _clientList = new Dictionary<uint, PipeStreamClient>();
+        private Thread ThreadReader;
+
+        /// <summary>
+        /// Starts the data reader thread to handle incoming data.
+        /// </summary>
+        private void StartDataReader()
+        {
+            try
+            {
+                PipeIn.Read(new byte[0]);
+                PipeisConnected = true;
+            }
+            catch (Exception ex)
+            {
+                PipeisConnected = false;
+            }
+            while (true)
+            {
+                try
+                {
+                    // [0] = dataType: 0=NewClient, 1=DataTransmission
+                    // [1-4] = dataLength or clientID if dataType = NewClient
+                    // [5-] = data (clientId + data packet transmitted)
+                    var startBytes = new byte[5];
+                    PipeIn.Read(startBytes, 0, 5);
+                    PipeisConnected = true;
+                    var dataType = startBytes[0];
+                    if (dataType == (byte)DataType.NewClient) // new client connection message
+                    {
+                        if (AcceptNewClient)
+                        {
+                            uint clientID = BitConverter.ToUInt32(startBytes, 1);
+                            var newPipeStream = new PipeStreamClient(this, clientID);
+                            _clientList.Add(clientID, newPipeStream);
+                            OnNewClient?.Invoke(newPipeStream);
+                        }
+                    }
+                    else if (dataType == (byte)DataType.DataTransmission) // data package
+                    {
+                        var dataLength = BitConverter.ToInt32(startBytes, 1);
+                        var data = new byte[dataLength];
+                        PipeIn.Read(data, 0, dataLength);
+                        lock (_clientList)
+                        {
+                            var clientId = BitConverter.ToUInt32(data, 0);
+                            if (_clientList.TryGetValue(clientId, out var server))
+                            {
+                                server.AddDataToRead(data.Skip(4).ToArray());
+                            }
+#if DEBUG
+                            else
+                            {
+                                Debug.WriteLine(IsListener);
+                                Debugger.Break();
+                            }
+#endif
+                        }
+                    }
+                    else
+                    {
+                        DataError = true;
+                        return;
+                    }
+                }
+                catch (Exception)
+                {
+                    PipeisConnected = false;
+                    _Sleep.Reset(1);
+                    _Sleep.Wait(1000);
+                    // Thread.Sleep(1000);
+                }
+            }
+        }
+        private CountdownEvent _Sleep = new CountdownEvent(1);
+        private CountdownEvent _PipeisConnectedIsUpdated = new CountdownEvent(1);
+        private bool IsListener;
+
+        private bool _PipeisConnected;
+        internal bool PipeisConnected
+        {
+            get
+            {
+                lock (_Sleep)
+                {
+                    if (!_PipeisConnected)
+                    {
+                        //Stopwatch sw = new Stopwatch();
+                        //sw.Start();
+
+                        Task.Run(() => { try { if (_PipeisConnectedIsUpdated.CurrentCount != 0) _Sleep.Signal(); } catch (Exception) { } });
+                        _PipeisConnectedIsUpdated.Reset(1);
+                        _PipeisConnectedIsUpdated.Wait(1000);
+                        //sw.Stop();
+                        //var x = _PipeisConnected;
+                        //Debugger.Break();
+                    }
+                }
+                return _PipeisConnected;
+            }
+            private set
+            {
+                if (value != _PipeisConnected)
+                {
+                    _PipeisConnected = value;
+                    try { if (_PipeisConnectedIsUpdated.CurrentCount !=0) _PipeisConnectedIsUpdated.Signal(); } catch (Exception) { }
+                }
+
+            }
+        }
+        internal enum DataType : byte
+        {
+            NewClient = 0,
+            DataTransmission = 1,
+        }
+
+        internal Stream? PipeIn;
+        internal Stream? PipeOut;
+        internal bool DataError = false;
+
         /// <summary>
         /// Starts accepting client connections.
         /// </summary>
-        public static void Start()
+        public void Start()
         {
             AcceptNewClient = true;
         }
@@ -93,7 +299,7 @@ namespace FullDuplexStreamSupport
         /// <summary>
         /// Stops accepting client connections and disposes all server streams.
         /// </summary>
-        public static void Stop()
+        public void Stop()
         {
             AcceptNewClient = false;
             foreach (var client in _clientList.Values)
@@ -101,174 +307,6 @@ namespace FullDuplexStreamSupport
                 client.Dispose();
             }
             _clientList.Clear();
-        }
-
-        public readonly uint Id;
-
-        public override bool CanRead => true;
-
-        public override bool CanSeek => false;
-
-        public override bool CanWrite => true;
-
-        public override long Length => throw new NotImplementedException();
-
-        public override long Position { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
-
-        /// <summary>
-        /// Writes data to the pipe stream.
-        /// </summary>
-        public override void Write(byte[] buffer, int offset, int count)
-        {
-            var type = new byte[] { 1 };
-            var dataLength = BitConverter.GetBytes(count);
-            var data = buffer.Skip(offset).Take(count);
-            var toSend = type.Concat(dataLength).Concat(data).ToArray();
-            PipeOut.Write(toSend, 0, toSend.Length);
-        }
-
-        /// <summary>
-        /// Asynchronously writes data to the pipe stream.
-        /// </summary>
-        public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken = default)
-        {
-            await Task.Run(() =>
-            {
-                lock (_readQueue)
-                {
-                    Write(buffer, offset, count);
-                }
-            }, cancellationToken);
-        }
-
-        /// <summary>
-        /// Reads data from the pipe stream.
-        /// </summary>
-        public override int Read(byte[] buffer, int offset, int count)
-        {
-            lock (_readQueue)
-            {
-                if (_readQueue.Count == 0)
-                    return 0;
-
-                byte[] data = _readQueue.Dequeue();
-                int bytesRead = Math.Min(data.Length, count);
-                Buffer.BlockCopy(data, 0, buffer, offset, bytesRead);
-                return bytesRead;
-            }
-        }
-
-        /// <summary>
-        /// Asynchronously reads data from the pipe stream.
-        /// </summary>
-        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken = default)
-        {
-            return await Task.Run(() =>
-            {
-                lock (_readQueue)
-                {
-                    return Read(buffer, offset, count);
-                }
-            }, cancellationToken);
-        }
-
-        /// <summary>
-        /// Adds data to the read queue.
-        /// </summary>
-        internal void AddDataToRead(byte[] data)
-        {
-            lock (_readQueue)
-            {
-                _readQueue.Enqueue(data);
-            }
-        }
-
-        /// <summary>
-        /// Called when data is written asynchronously.
-        /// </summary>
-        protected virtual Task OnDataWrittenAsync()
-        {
-            return Task.CompletedTask;
-        }
-
-        /// <summary>
-        /// Flushes the pipe stream.
-        /// </summary>
-        public override void Flush()
-        {
-            PipeOut.Flush();
-        }
-
-        public override long Seek(long offset, SeekOrigin origin)
-        {
-            throw new NotImplementedException();
-        }
-
-        public override void SetLength(long value)
-        {
-            throw new NotImplementedException();
-        }
-
-        /// <summary>
-        /// Connects to the pipe stream with a specified timeout.
-        /// </summary>
-        public void Connect(int timeoutMs = 0)
-        {
-            var type = new byte[] { 0 };
-            var data = BitConverter.GetBytes(Id);
-            var toSend = type.Concat(data).ToArray();
-            var timeoutCancellationTokenSource = new CancellationTokenSource();
-
-            if (timeoutMs > 0)
-            {
-                timeoutCancellationTokenSource.CancelAfter(timeoutMs);
-            }
-
-            try
-            {
-                var connectTask = Task.Run(() =>
-                {
-                    PipeOut.Write(toSend, 0, toSend.Length);
-                    _isConnected = true;
-                }, timeoutCancellationTokenSource.Token);
-
-                connectTask.Wait(timeoutCancellationTokenSource.Token);
-            }
-            catch (OperationCanceledException)
-            {
-                _isConnected = false;
-                throw new TimeoutException("Connection attempt timed out.");
-            }
-            catch (Exception)
-            {
-                _isConnected = false;
-                throw;
-            }
-        }
-
-        private bool _isConnected = false;
-        public bool IsConnected => PipeIn != null || PipeOut != null;
-
-        /// <summary>
-        /// Disposes the pipe stream.
-        /// </summary>
-        protected override void Dispose(bool disposing)
-        {
-            if (!_disposed)
-            {
-                if (disposing)
-                {
-                    _readQueue.Clear();
-                }
-                _disposed = true;
-            }
-            base.Dispose(disposing);
-        }
-
-        public void Dispose()
-        {
-            Dispose(true);
-            GC.SuppressFinalize(this);
         }
     }
 
