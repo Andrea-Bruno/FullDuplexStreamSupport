@@ -14,9 +14,11 @@ namespace FullDuplexStreamSupport
     /// <summary>
     /// Represents a client connected to a pipe stream.
     /// </summary>
-    public class PipeStreamClient : IStream
+    public class PipeStreamClient : Stream, IStream
     {
         private Queue<byte[]> _readQueue = new Queue<byte[]>();
+        private AutoResetEvent _dataAvailable = new AutoResetEvent(false);
+
         private bool _disposed = false;
         PipeStream PipeStream;
 
@@ -47,78 +49,104 @@ namespace FullDuplexStreamSupport
 
         public readonly uint Id;
 
-        public bool CanRead => true;
+        public override bool CanRead => true;
 
-        public bool CanSeek => false;
+        public override bool CanSeek => false;
 
-        public bool CanWrite => true;
+        public override bool CanWrite => true;
 
-        public long Length => throw new NotImplementedException();
+        public override long Length => throw new NotImplementedException();
 
-        public long Position { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
+        public override long Position { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
 
         /// <summary>
         /// Writes data to the pipe stream.
         /// </summary>
-        public void Write(byte[] buffer, int offset, int count)
+        public override void Write(byte[] buffer, int offset, int count)
         {
             var type = new byte[] { (byte)PipeStream.DataType.DataTransmission };
             var clientId = BitConverter.GetBytes(Id);
             var dataLength = BitConverter.GetBytes(clientId.Length + count);
             var data = buffer.Skip(offset).Take(count);
             var toSend = type.Concat(dataLength).Concat(clientId).Concat(data).ToArray();
-            PipeStream.PipeOut.Write(toSend, 0, toSend.Length);
+            PipeStream.PipeOut?.Write(toSend, 0, toSend.Length);
         }
 
         /// <summary>
         /// Asynchronously writes data to the pipe stream.
         /// </summary>
-        public async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken = default)
+        public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken = default)
         {
             await Task.Run(() =>
             {
-                lock (_readQueue)
+                lock (WriteLock)
                 {
                     Write(buffer, offset, count);
                 }
             }, cancellationToken);
         }
+        private object WriteLock = new object();
 
         /// <summary>
         /// Reads data from the pipe stream.
         /// </summary>
-        public int Read(byte[] buffer, int offset, int count)
+        public override int Read(byte[] buffer, int offset, int count)
         {
-            lock (_readQueue)
+            int result;
+            lock (ReadLock)
             {
-                if (_readQueue.Count == 0)
-                    return 0;
+                InReading = count;
+                _dataAvailable.Reset(); // Reset the event (otherwise WaitOne will not stop the process)
+                var queueLength = _readQueue.Sum(x => x.Length);
+                if (queueLength < count)
+                {
+                    _dataAvailable.WaitOne(); // Wait until data is available
+                    if (_readQueue.Count == 0)
+                        Debugger.Break();
+                }
+                lock (_readQueue)
+                {
+                    if (_readQueue.Count == 0)
+                        Debugger.Break();
+                    byte[] data = _readQueue.Peek();
+                    int bytesRead = Math.Min(data.Length, count);
+                    Buffer.BlockCopy(data, 0, buffer, offset, bytesRead);
 
-                byte[] data = _readQueue.Dequeue();
-                int bytesRead = Math.Min(data.Length, count);
-                Buffer.BlockCopy(data, 0, buffer, offset, bytesRead);
-                return bytesRead;
+                    if (bytesRead == data.Length)
+                    {
+                        _readQueue.Dequeue(); // Remove the data from the queue if fully read
+                    }
+                    else
+                    {
+                        // If only part of the data is read, update the queue with the remaining data
+                        byte[] remainingData = new byte[data.Length - bytesRead];
+                        Buffer.BlockCopy(data, bytesRead, remainingData, 0, remainingData.Length);
+                        _readQueue.Dequeue();
+                        _readQueue.Enqueue(remainingData);
+                    }
+                    result = bytesRead;
+                }
             }
+            return result;
         }
+        private object ReadLock = new object();
+        private int InReading;
 
         /// <summary>
         /// Asynchronously reads data from the pipe stream.
         /// </summary>
-        public async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken = default)
+        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken = default)
         {
             return await Task.Run(() =>
             {
-                lock (_readQueue)
-                {
-                    return Read(buffer, offset, count);
-                }
+                return Read(buffer, offset, count);
             }, cancellationToken);
         }
 
         /// <summary>
         /// Begins an asynchronous read operation.
         /// </summary>
-        public IAsyncResult BeginRead(byte[] buffer, int offset, int count, AsyncCallback? callback, object? state)
+        public override IAsyncResult BeginRead(byte[] buffer, int offset, int count, AsyncCallback? callback, object? state)
         {
             var task = ReadAsync(buffer, offset, count);
             var tcs = new TaskCompletionSource<int>(state);
@@ -144,7 +172,7 @@ namespace FullDuplexStreamSupport
         /// <summary>
         /// Ends an asynchronous read operation.
         /// </summary>
-        public int EndRead(IAsyncResult asyncResult)
+        public override int EndRead(IAsyncResult asyncResult)
         {
             return ((Task<int>)asyncResult).Result;
         }
@@ -157,6 +185,13 @@ namespace FullDuplexStreamSupport
             lock (_readQueue)
             {
                 _readQueue.Enqueue(data);
+                var queueLength = _readQueue.Sum(x => x.Length);
+                if (queueLength >= InReading)
+                {
+                    if (_readQueue.Count == 0) Debugger.Break();
+                    _dataAvailable.Set(); // Unlock the thread in Read function
+                    if (_readQueue.Count == 0) Debugger.Break();
+                }
             }
         }
 
@@ -171,17 +206,17 @@ namespace FullDuplexStreamSupport
         /// <summary>
         /// Flushes the pipe stream.
         /// </summary>
-        public void Flush()
+        public override void Flush()
         {
             PipeStream.PipeOut?.Flush();
         }
 
-        public long Seek(long offset, SeekOrigin origin)
+        public override long Seek(long offset, SeekOrigin origin)
         {
             throw new NotImplementedException();
         }
 
-        public void SetLength(long value)
+        public override void SetLength(long value)
         {
             throw new NotImplementedException();
         }
@@ -205,7 +240,7 @@ namespace FullDuplexStreamSupport
             {
                 var connectTask = Task.Run(() =>
                 {
-                    PipeStream.PipeOut.Write(toSend, 0, toSend.Length);
+                    PipeStream.PipeOut?.Write(toSend, 0, toSend.Length);
                     _isConnected = true;
                 }, timeoutCancellationTokenSource.Token);
 
@@ -229,30 +264,31 @@ namespace FullDuplexStreamSupport
         /// <summary>
         /// Disposes the pipe stream.
         /// </summary>
-        protected virtual void Dispose(bool disposing)
+        protected override void Dispose(bool disposing)
         {
             if (!_disposed)
             {
                 if (disposing)
                 {
                     _readQueue.Clear();
+                    _dataAvailable.Dispose();
+                    Debugger.Break();
                 }
                 _disposed = true;
             }
-        }
-
-        public void Dispose()
-        {
-            Dispose(true);
-            GC.SuppressFinalize(this);
+            base.Dispose(disposing);
         }
 
         /// <summary>
         /// Closes the pipe stream and releases all resources.
         /// </summary>
-        public void Close()
+        public override void Close()
         {
-            Dispose();
+            if (!_disposed)
+            {
+                Dispose(true);
+                GC.SuppressFinalize(this);
+            }
         }
 
         /// <summary>

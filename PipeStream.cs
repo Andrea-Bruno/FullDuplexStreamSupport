@@ -201,9 +201,10 @@ namespace FullDuplexStreamSupport
                         if (AcceptNewClient)
                         {
                             uint clientID = BitConverter.ToUInt32(startBytes, 1);
-                            var newPipeStream = new PipeStreamClient(this, clientID);
-                            _clientList.Add(clientID, newPipeStream);
-                            OnNewClient?.Invoke(newPipeStream);
+                            AddNewCLient(clientID);
+                            //var newPipeStream = new PipeStreamClient(this, clientID);
+                            //_clientList.Add(clientID, newPipeStream);
+                            //OnNewClient?.Invoke(newPipeStream);
                         }
                     }
                     else if (dataType == (byte)DataType.DataTransmission) // data package
@@ -221,6 +222,7 @@ namespace FullDuplexStreamSupport
 #if DEBUG
                             else
                             {
+                                // Codice omesso
                                 Debug.WriteLine(IsListener);
                                 Debugger.Break();
                             }
@@ -241,6 +243,22 @@ namespace FullDuplexStreamSupport
                     // Thread.Sleep(1000);
                 }
             }
+        }
+        /// <summary>
+        /// Adds a new client to the server if this instance is a listener, otherwise add a client in client side which acts as a communication stream.
+        /// </summary>
+        /// <param name="clientId">Client id: The id must be specified only if the client is created by the listener and will be the one communicated with the connection event</param>
+        /// <returns></returns>
+        public PipeStreamClient AddNewCLient(uint? clientId = null)
+        {
+            if (clientId != null && !IsListener)
+            {
+                throw new InvalidOperationException("The client id must be specified only if the client is created by the listener.");
+            }
+            var newPipeStream = new PipeStreamClient(this, clientId);
+            _clientList.Add(newPipeStream.Id, newPipeStream);
+            OnNewClient?.Invoke(newPipeStream);
+            return newPipeStream;
         }
         private CountdownEvent _Sleep = new CountdownEvent(1);
         private CountdownEvent _PipeisConnectedIsUpdated = new CountdownEvent(1);
