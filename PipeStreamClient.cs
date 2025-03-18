@@ -271,7 +271,9 @@ namespace FullDuplexStreamSupport
                 {
                     _readQueue.Clear();
                     _dataAvailable.Dispose();
+#if !Test
                     Debugger.Break();
+#endif
                 }
                 _disposed = true;
             }
