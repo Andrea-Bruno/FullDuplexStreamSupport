@@ -25,7 +25,7 @@ namespace FullDuplexStreamSupport
         public void InitializeServer(Stream pipeIn, Stream pipeOut, Action<PipeStreamClient>? onNewClient = null)
         {
             IsListener = true;
-            new Thread(() =>
+            new Task(() =>
             {
                 Initialize(pipeIn, pipeOut, onNewClient);
             }).Start();
@@ -68,9 +68,9 @@ namespace FullDuplexStreamSupport
 
                 WaitForConnection(pipeIn, pipeOut);
 
-                ThreadReader?.Abort();
+                // ThreadReader?.Abort();
                 DataError = false;
-                ThreadReader = new Thread(() => StartDataReader());
+                ThreadReader = new Task(() => StartDataReader());
                 ThreadReader.Start();
             }
         }
@@ -169,7 +169,7 @@ namespace FullDuplexStreamSupport
         private Action<PipeStreamClient>? OnNewClient;
         public bool AcceptNewClient = true;
         internal readonly Dictionary<uint, PipeStreamClient> _clientList = new Dictionary<uint, PipeStreamClient>();
-        private Thread ThreadReader;
+        private Task? ThreadReader;
 
         /// <summary>
         /// Starts the data reader thread to handle incoming data.
