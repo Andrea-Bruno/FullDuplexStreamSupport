@@ -201,7 +201,7 @@ namespace FullDuplexStreamSupport
                         if (AcceptNewClient)
                         {
                             uint clientID = BitConverter.ToUInt32(startBytes, 1);
-                            AddNewCLient(clientID);
+                            AddNewClient(clientID);
                             //var newPipeStream = new PipeStreamClient(this, clientID);
                             //_clientList.Add(clientID, newPipeStream);
                             //OnNewClient?.Invoke(newPipeStream);
@@ -249,7 +249,7 @@ namespace FullDuplexStreamSupport
         /// </summary>
         /// <param name="clientId">Client id: The id must be specified only if the client is created by the listener and will be the one communicated with the connection event</param>
         /// <returns></returns>
-        public PipeStreamClient AddNewCLient(uint? clientId = null)
+        public PipeStreamClient AddNewClient(uint? clientId = null)
         {
             if (clientId != null && !IsListener)
             {
