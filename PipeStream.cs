@@ -68,9 +68,9 @@ namespace FullDuplexStreamSupport
 
                 WaitForConnection(pipeIn, pipeOut);
 
-                // ThreadReader?.Abort();
+                ThreadReader?.Abort();
                 DataError = false;
-                ThreadReader = new Task(() => StartDataReader());
+                ThreadReader = new Thread(() => StartDataReader());
                 ThreadReader.Start();
             }
         }
@@ -169,7 +169,7 @@ namespace FullDuplexStreamSupport
         private Action<PipeStreamClient>? OnNewClient;
         public bool AcceptNewClient = true;
         internal readonly Dictionary<uint, PipeStreamClient> _clientList = new Dictionary<uint, PipeStreamClient>();
-        private Task? ThreadReader;
+        private Thread? ThreadReader;
 
         /// <summary>
         /// Starts the data reader thread to handle incoming data.
@@ -222,7 +222,7 @@ namespace FullDuplexStreamSupport
 #if DEBUG
                             else
                             {
-                                // Codice omesso
+                                // Missing code
                                 Debug.WriteLine(IsListener);
                                 Debugger.Break();
                             }
@@ -291,7 +291,7 @@ namespace FullDuplexStreamSupport
                 if (value != _PipeisConnected)
                 {
                     _PipeisConnected = value;
-                    try { if (_PipeisConnectedIsUpdated.CurrentCount !=0) _PipeisConnectedIsUpdated.Signal(); } catch (Exception) { }
+                    try { if (_PipeisConnectedIsUpdated.CurrentCount != 0) _PipeisConnectedIsUpdated.Signal(); } catch (Exception) { }
                 }
 
             }

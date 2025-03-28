@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
 using System.Threading;
 using System.Diagnostics;
@@ -271,9 +272,7 @@ namespace FullDuplexStreamSupport
                 {
                     _readQueue.Clear();
                     _dataAvailable.Dispose();
-#if !Test
                     Debugger.Break();
-#endif
                 }
                 _disposed = true;
             }
