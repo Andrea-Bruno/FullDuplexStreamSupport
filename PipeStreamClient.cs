@@ -33,7 +33,10 @@ namespace FullDuplexStreamSupport
             {
                 if (!pipeStream.PipeisConnected)
                 {
+#if DEBUG && !TEST
+
                     Debugger.Break();
+#endif
                     throw new InvalidOperationException("Pipe is not connected.");
                 }
                 PipeStream = pipeStream;
@@ -270,9 +273,15 @@ namespace FullDuplexStreamSupport
             {
                 if (disposing)
                 {
+                    PipeStream?.PipeOut?.Close();
+                    PipeStream?.PipeOut?.Dispose();
+                    PipeStream?.PipeIn?.Close();
+                    PipeStream?.PipeIn?.Dispose();
                     _readQueue.Clear();
                     _dataAvailable.Dispose();
+#if DEBUG && !TEST
                     Debugger.Break();
+#endif
                 }
                 _disposed = true;
             }
