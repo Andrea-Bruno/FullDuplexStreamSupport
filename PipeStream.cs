@@ -25,10 +25,9 @@ namespace FullDuplexStreamSupport
         public void InitializeServer(Stream pipeIn, Stream pipeOut, Action<PipeStreamClient>? onNewClient = null)
         {
             IsListener = true;
-            new Task(() =>
-            {
-                Initialize(pipeIn, pipeOut, onNewClient);
-            }).Start();
+            var manualEvent = new ManualResetEvent(false);
+            Task.Run(() => Initialize(pipeIn, pipeOut, onNewClient, manualResetEvent: manualEvent));
+            manualEvent.WaitOne();
         }
 
         /// <summary>
@@ -50,7 +49,8 @@ namespace FullDuplexStreamSupport
         /// <param name="pipeOut">Output stream</param>
         /// <param name="onNewClient">Action to invoke when a new client connects</param>
         /// <param name="connectTimeOutMs">Optional timeout for connection in milliseconds</param>
-        private void Initialize(Stream pipeIn, Stream pipeOut, Action<PipeStreamClient>? onNewClient = null, int? connectTimeOutMs = null)
+        /// <param name="manualResetEvent">Optional manual reset event to signal when the initialization is completed</param>
+        private void Initialize(Stream pipeIn, Stream pipeOut, Action<PipeStreamClient>? onNewClient = null, int? connectTimeOutMs = null, ManualResetEvent? manualResetEvent = null)
         {
             lock (_clientList)
             {
@@ -66,7 +66,7 @@ namespace FullDuplexStreamSupport
                 PipeOut = pipeOut;
                 CallConnect(pipeOut, connectTimeOutMs);
 
-                WaitForConnection(pipeIn, pipeOut);
+                WaitForConnection(pipeIn, pipeOut, manualResetEvent);
 
                 ThreadReader?.Abort();
                 DataError = false;
@@ -104,7 +104,8 @@ namespace FullDuplexStreamSupport
         /// </summary>
         /// <param name="pipeIn">Input stream</param>
         /// <param name="pipeOut">Output stream</param>
-        private static void WaitForConnection(Stream pipeIn, Stream pipeOut)
+        /// <param name="manualResetEvent">Optional manual reset event to signal when the initialization is completed</param>
+        private static void WaitForConnection(Stream pipeIn, Stream pipeOut, ManualResetEvent? manualResetEvent = null)
         {
             bool pipeInConnected = false;
             bool pipeOutConnected = false;
@@ -143,7 +144,7 @@ namespace FullDuplexStreamSupport
             {
                 pipeOutConnected = true;
             }
-
+            manualResetEvent?.Set();
             Task.WaitAll(new Task[] { waitForConnectionInTask ?? Task.CompletedTask, waitForConnectionOutTask ?? Task.CompletedTask });
 
             if (!pipeInConnected || !pipeOutConnected)

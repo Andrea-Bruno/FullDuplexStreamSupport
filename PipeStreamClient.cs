@@ -43,7 +43,7 @@ namespace FullDuplexStreamSupport
                 if (clientId != null)
                 {
                     _isConnected = true;
-                    pipeStream.NextClientId = (uint)clientId;
+                    PipeStream.NextClientId = (uint)clientId;
                 }
                 Id = PipeStream.NextClientId;
                 PipeStream.NextClientId++;
