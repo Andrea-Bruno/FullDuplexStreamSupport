@@ -16,9 +16,9 @@ namespace FullDuplexStreamSupport
     /// </summary>
     public class PipeStreamClient : Stream, IStream
     {
-        private Queue<byte[]> _readQueue = new Queue<byte[]>();
+        // private Queue<byte[]> _readQueue = new Queue<byte[]>();
         private AutoResetEvent _dataAvailable = new AutoResetEvent(false);
-
+        private List<byte> _readQueue = new List<byte>();
         private bool _disposed = false;
         PipeStream PipeStream;
 
@@ -67,12 +67,21 @@ namespace FullDuplexStreamSupport
         /// </summary>
         public override void Write(byte[] buffer, int offset, int count)
         {
-            var type = new byte[] { (byte)PipeStream.DataType.DataTransmission };
-            var clientId = BitConverter.GetBytes(Id);
-            var dataLength = BitConverter.GetBytes(clientId.Length + count);
-            var data = buffer.Skip(offset).Take(count);
-            var toSend = type.Concat(dataLength).Concat(clientId).Concat(data).ToArray();
-            PipeStream.PipeOut?.Write(toSend, 0, toSend.Length);
+            var pipeOut = PipeStream.PipeOut;
+            if (pipeOut == null)
+            {
+                Debugger.Break(); // PipeOut is null, investigate why
+                return;
+            }
+            lock (pipeOut)
+            {
+                var type = new byte[] { (byte)PipeStream.DataType.DataTransmission };
+                var clientId = BitConverter.GetBytes(Id);
+                var dataLength = BitConverter.GetBytes(clientId.Length + count);
+                var data = buffer.Skip(offset).Take(count);
+                var toSend = type.Concat(dataLength).Concat(clientId).Concat(data).ToArray();
+                pipeOut.Write(toSend, 0, toSend.Length);
+            }
         }
 
         /// <summary>
@@ -95,43 +104,36 @@ namespace FullDuplexStreamSupport
         /// </summary>
         public override int Read(byte[] buffer, int offset, int count)
         {
-            int result;
+            int bytesRead = 0;
             lock (ReadLock)
             {
                 InReading = count;
-                _dataAvailable.Reset(); // Reset the event (otherwise WaitOne will not stop the process)
-                var queueLength = _readQueue.Sum(x => x.Length);
-                if (queueLength < count)
+                _dataAvailable.Reset();
+                while (true)
                 {
-                    _dataAvailable.WaitOne(); // Wait until data is available
-                    if (_readQueue.Count == 0)
-                        Debugger.Break();
+                    lock (_readQueue)
+                    {
+                        if (_readQueue.Count >= count)
+                            break;
+                        if (_disposed)
+                            throw new ObjectDisposedException(nameof(PipeStreamClient));
+                    }
+                    _dataAvailable.WaitOne();
+                    if (_disposed)
+                        throw new ObjectDisposedException(nameof(PipeStreamClient));
                 }
+
                 lock (_readQueue)
                 {
-                    if (_readQueue.Count == 0)
-                        Debugger.Break();
-                    byte[] data = _readQueue.Peek();
-                    int bytesRead = Math.Min(data.Length, count);
-                    Buffer.BlockCopy(data, 0, buffer, offset, bytesRead);
-
-                    if (bytesRead == data.Length)
-                    {
-                        _readQueue.Dequeue(); // Remove the data from the queue if fully read
-                    }
-                    else
-                    {
-                        // If only part of the data is read, update the queue with the remaining data
-                        byte[] remainingData = new byte[data.Length - bytesRead];
-                        Buffer.BlockCopy(data, bytesRead, remainingData, 0, remainingData.Length);
-                        _readQueue.Dequeue();
-                        _readQueue.Enqueue(remainingData);
-                    }
-                    result = bytesRead;
+                    int toCopy = Math.Min(count, _readQueue.Count);
+                    _readQueue.CopyTo(0, buffer, offset, toCopy);
+                    _readQueue.RemoveRange(0, toCopy);
+                    bytesRead = toCopy;
                 }
             }
-            return result;
+            return bytesRead;
         }
+
         private object ReadLock = new object();
         private int InReading;
 
@@ -187,13 +189,10 @@ namespace FullDuplexStreamSupport
         {
             lock (_readQueue)
             {
-                _readQueue.Enqueue(data);
-                var queueLength = _readQueue.Sum(x => x.Length);
-                if (queueLength >= InReading)
+                _readQueue.AddRange(data);
+                if (_readQueue.Count >= InReading)
                 {
-                    if (_readQueue.Count == 0) Debugger.Break();
-                    _dataAvailable.Set(); // Unlock the thread in Read function
-                    if (_readQueue.Count == 0) Debugger.Break();
+                    _dataAvailable.Set();
                 }
             }
         }
@@ -269,15 +268,17 @@ namespace FullDuplexStreamSupport
         /// </summary>
         protected override void Dispose(bool disposing)
         {
+            Debugger.Break(); // Investigate about close connection
             if (!_disposed)
             {
                 if (disposing)
                 {
+                    _dataAvailable.Set();
                     PipeStream?.PipeOut?.Close();
                     PipeStream?.PipeOut?.Dispose();
                     PipeStream?.PipeIn?.Close();
                     PipeStream?.PipeIn?.Dispose();
-                    _readQueue.Clear();
+                    //_readQueue.Clear();
                     _dataAvailable.Dispose();
 #if DEBUG && !TEST
                     Debugger.Break();

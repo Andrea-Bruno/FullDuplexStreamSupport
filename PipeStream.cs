@@ -177,67 +177,84 @@ namespace FullDuplexStreamSupport
         /// </summary>
         private void StartDataReader()
         {
+            var pipeIn = PipeIn;
             try
             {
-                PipeIn.Read(new byte[0]);
-                PipeisConnected = true;
+                if (pipeIn is null)
+                    PipeisConnected = false;
+                else
+                {
+                    pipeIn.Read(new byte[0]);
+                    PipeisConnected = true;
+                }
             }
             catch (Exception ex)
             {
+                Debug.WriteLine(ex);
+                Debugger.Break();
                 PipeisConnected = false;
             }
             while (true)
             {
                 try
                 {
-                    // [0] = dataType: 0=NewClient, 1=DataTransmission
-                    // [1-4] = dataLength or clientID if dataType = NewClient
-                    // [5-] = data (clientId + data packet transmitted)
-                    var startBytes = new byte[5];
-                    PipeIn.Read(startBytes, 0, 5);
-                    PipeisConnected = true;
-                    var dataType = startBytes[0];
-                    if (dataType == (byte)DataType.NewClient) // new client connection message
+                    if (pipeIn is null)
                     {
-                        if (AcceptNewClient)
-                        {
-                            uint clientID = BitConverter.ToUInt32(startBytes, 1);
-                            AddNewClient(clientID);
-                            //var newPipeStream = new PipeStreamClient(this, clientID);
-                            //_clientList.Add(clientID, newPipeStream);
-                            //OnNewClient?.Invoke(newPipeStream);
-                        }
-                    }
-                    else if (dataType == (byte)DataType.DataTransmission) // data package
-                    {
-                        var dataLength = BitConverter.ToInt32(startBytes, 1);
-                        var data = new byte[dataLength];
-                        PipeIn.Read(data, 0, dataLength);
-                        lock (_clientList)
-                        {
-                            var clientId = BitConverter.ToUInt32(data, 0);
-                            if (_clientList.TryGetValue(clientId, out var server))
-                            {
-                                server.AddDataToRead(data.Skip(4).ToArray());
-                            }
-#if DEBUG
-                            else
-                            {
-                                // Missing code
-                                Debug.WriteLine(IsListener);
-                                Debugger.Break();
-                            }
-#endif
-                        }
+                        throw new InvalidOperationException("PipeIn is null");
                     }
                     else
                     {
-                        DataError = true;
-                        return;
+                        // [0] = dataType: 0=NewClient, 1=DataTransmission
+                        // [1-4] = dataLength or clientID if dataType = NewClient
+                        // [5-] = data (clientId + data packet transmitted)
+                        var startBytes = new byte[5];
+                        pipeIn.Read(startBytes, 0, 5);
+                        PipeisConnected = true;
+                        var dataType = startBytes[0];
+                        if (dataType == (byte)DataType.NewClient) // new client connection message
+                        {
+                            if (AcceptNewClient)
+                            {
+                                uint clientID = BitConverter.ToUInt32(startBytes, 1);
+                                AddNewClient(clientID);
+                                //var newPipeStream = new PipeStreamClient(this, clientID);
+                                //_clientList.Add(clientID, newPipeStream);
+                                //OnNewClient?.Invoke(newPipeStream);
+                            }
+                        }
+                        else if (dataType == (byte)DataType.DataTransmission) // data package
+                        {
+                            var dataLength = BitConverter.ToInt32(startBytes, 1);
+                            var data = new byte[dataLength];
+                            pipeIn.Read(data, 0, dataLength);
+                            lock (_clientList)
+                            {
+                                var clientId = BitConverter.ToUInt32(data, 0);
+                                if (_clientList.TryGetValue(clientId, out var server))
+                                {
+                                    server.AddDataToRead(data.Skip(4).ToArray());
+                                }
+#if DEBUG
+                                else
+                                {
+                                    // Missing code
+                                    Debug.WriteLine(IsListener);
+                                    Debugger.Break();
+                                }
+#endif
+                            }
+                        }
+                        else
+                        {
+                            Debugger.Break();
+                            DataError = true;
+                            return;
+                        }
                     }
                 }
                 catch (Exception)
                 {
+                    Debugger.Break();
                     PipeisConnected = false;
                     _Sleep.Reset(1);
                     _Sleep.Wait(1000);
