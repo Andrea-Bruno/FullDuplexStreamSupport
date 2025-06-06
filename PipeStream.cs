@@ -252,7 +252,7 @@ namespace FullDuplexStreamSupport
                         }
                     }
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
                     Debugger.Break();
                     PipeisConnected = false;
