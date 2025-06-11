@@ -68,10 +68,8 @@ namespace FullDuplexStreamSupport
 
                 WaitForConnection(pipeIn, pipeOut, manualResetEvent);
 
-                ThreadReader?.Abort();
                 DataError = false;
-                ThreadReader = new Thread(() => StartDataReader());
-                ThreadReader.Start();
+                TaskReader = Task.Run(() => StartDataReader());
             }
         }
 
@@ -170,12 +168,12 @@ namespace FullDuplexStreamSupport
         private Action<PipeStreamClient>? OnNewClient;
         public bool AcceptNewClient = true;
         internal readonly Dictionary<uint, PipeStreamClient> _clientList = new Dictionary<uint, PipeStreamClient>();
-        private Thread? ThreadReader;
+        private Task? TaskReader;
 
         /// <summary>
         /// Starts the data reader thread to handle incoming data.
         /// </summary>
-        private void StartDataReader()
+        private async Task StartDataReader()
         {
             var pipeIn = PipeIn;
             try
@@ -194,7 +192,8 @@ namespace FullDuplexStreamSupport
                 Debugger.Break();
                 PipeisConnected = false;
             }
-            while (true)
+            var taskId = TaskReader?.Id;
+            while (taskId == TaskReader?.Id)
             {
                 try
                 {
@@ -204,25 +203,19 @@ namespace FullDuplexStreamSupport
                     }
                     else
                     {
-                        // [0] = dataType: 0=NewClient, 1=DataTransmission
-                        // [1-4] = dataLength or clientID if dataType = NewClient
-                        // [5-] = data (clientId + data packet transmitted)
                         var startBytes = new byte[5];
                         pipeIn.Read(startBytes, 0, 5);
                         PipeisConnected = true;
                         var dataType = startBytes[0];
-                        if (dataType == (byte)DataType.NewClient) // new client connection message
+                        if (dataType == (byte)DataType.NewClient)
                         {
                             if (AcceptNewClient)
                             {
                                 uint clientID = BitConverter.ToUInt32(startBytes, 1);
                                 AddNewClient(clientID);
-                                //var newPipeStream = new PipeStreamClient(this, clientID);
-                                //_clientList.Add(clientID, newPipeStream);
-                                //OnNewClient?.Invoke(newPipeStream);
                             }
                         }
-                        else if (dataType == (byte)DataType.DataTransmission) // data package
+                        else if (dataType == (byte)DataType.DataTransmission)
                         {
                             var dataLength = BitConverter.ToInt32(startBytes, 1);
                             var data = new byte[dataLength];
@@ -234,14 +227,6 @@ namespace FullDuplexStreamSupport
                                 {
                                     server.AddDataToRead(data.Skip(4).ToArray());
                                 }
-#if DEBUG
-                                else
-                                {
-                                    // Missing code
-                                    Debug.WriteLine(IsListener);
-                                    Debugger.Break();
-                                }
-#endif
                             }
                         }
                         else
@@ -254,14 +239,12 @@ namespace FullDuplexStreamSupport
                 }
                 catch (Exception ex)
                 {
-                    Debugger.Break();
                     PipeisConnected = false;
-                    _Sleep.Reset(1);
-                    _Sleep.Wait(1000);
-                    // Thread.Sleep(1000);
+                    await Task.Delay(1000);
                 }
             }
         }
+
         /// <summary>
         /// Adds a new client to the server if this instance is a listener, otherwise add a client in client side which acts as a communication stream.
         /// </summary>
@@ -278,7 +261,6 @@ namespace FullDuplexStreamSupport
             OnNewClient?.Invoke(newPipeStream);
             return newPipeStream;
         }
-        private CountdownEvent _Sleep = new CountdownEvent(1);
         private CountdownEvent _PipeisConnectedIsUpdated = new CountdownEvent(1);
         private bool IsListener;
 
@@ -287,19 +269,12 @@ namespace FullDuplexStreamSupport
         {
             get
             {
-                lock (_Sleep)
+                lock (_PipeisConnectedIsUpdated)
                 {
                     if (!_PipeisConnected)
                     {
-                        //Stopwatch sw = new Stopwatch();
-                        //sw.Start();
-
-                        Task.Run(() => { try { if (_PipeisConnectedIsUpdated.CurrentCount != 0) _Sleep.Signal(); } catch (Exception) { } });
                         _PipeisConnectedIsUpdated.Reset(1);
                         _PipeisConnectedIsUpdated.Wait(1000);
-                        //sw.Stop();
-                        //var x = _PipeisConnected;
-                        //Debugger.Break();
                     }
                 }
                 return _PipeisConnected;
